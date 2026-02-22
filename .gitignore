@@ -1,0 +1,12 @@
+# API keys and local config
+config.json
+
+# Pipeline artifacts (large, regenerable)
+input/
+pipeline/
+output/
+
+# Python
+__pycache__/
+*.pyc
+.venv/

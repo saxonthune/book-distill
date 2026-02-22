@@ -1,0 +1,19 @@
+{
+  "openrouter_api_key": "sk-or-v1-your-key-here",
+
+  "models": {
+    "extraction": "deepseek/deepseek-chat",
+    "triage": "deepseek/deepseek-chat",
+    "synthesis": "deepseek/deepseek-chat",
+    "editorial": "anthropic/claude-sonnet-4"
+  },
+
+  "chunking": {
+    "max_words": 500,
+    "overlap_words": 50
+  },
+
+  "synthesis": {
+    "target_lines": 400
+  }
+}
