@@ -14,9 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-import litellm
-
-from config import load_config, setup_litellm, load_prompt, ROOT
+from config import load_config, load_settings, setup_litellm, load_prompt, stream_completion, ROOT
 
 
 def run_synthesis(pipeline_path: str) -> None:
@@ -37,21 +35,20 @@ def run_synthesis(pipeline_path: str) -> None:
     config = load_config()
     setup_litellm(config)
     model = config["models"]["synthesis"]
-    target_lines = config.get("synthesis", {}).get("target_lines", 400)
+    settings = load_settings(pipeline_path, config)
+    target_lines = settings["synthesis"].get("target_lines", 400)
 
     prompt_template = load_prompt("synthesize")
     prompt = prompt_template.replace("{extractions}", merged_text).replace("{target_lines}", str(target_lines))
 
-    print(f"Calling {model} for synthesis (target {target_lines} lines)...")
+    print(f"Synthesizing with {model} (target {target_lines} lines)...")
     start = time.time()
 
-    response = litellm.completion(
-        model=f"openrouter/{model}",
-        messages=[{"role": "user", "content": prompt}],
+    skill_md, usage = stream_completion(
+        model, [{"role": "user", "content": prompt}], label="Synthesizing"
     )
 
     elapsed = time.time() - start
-    skill_md = response.choices[0].message.content
 
     # Strip markdown code fences if the model wrapped it
     if skill_md.startswith("```"):
@@ -73,11 +70,10 @@ def run_synthesis(pipeline_path: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "SKILL.md").write_text(skill_md)
 
-    usage = response.usage
     summary = {
         "model": model,
-        "input_tokens": usage.prompt_tokens if usage else 0,
-        "output_tokens": usage.completion_tokens if usage else 0,
+        "input_tokens": usage["input_tokens"],
+        "output_tokens": usage["output_tokens"],
         "elapsed_seconds": round(elapsed, 1),
         "output_lines": len(skill_md.splitlines()),
     }

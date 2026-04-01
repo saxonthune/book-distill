@@ -5,7 +5,19 @@
     "extraction": "deepseek/deepseek-chat",
     "triage": "deepseek/deepseek-chat",
     "synthesis": "deepseek/deepseek-chat",
-    "editorial": "anthropic/claude-sonnet-4"
+    "verification": "deepseek/deepseek-chat",
+    "revision": "deepseek/deepseek-chat",
+    "editorial": "anthropic/claude-sonnet-4",
+    "vision_extraction": "google/gemini-2.5-flash-lite"
+  },
+
+  "vision": {
+    "dpi": 200,
+    "jpeg_quality": 85,
+    "max_pages_per_call": 20,
+    "fallback_group_size": 20,
+    "overlap_pages": 1,
+    "max_workers": 4
   },
 
   "chunking": {
@@ -15,5 +27,7 @@
 
   "synthesis": {
     "target_lines": 400
-  }
+  },
+
+  "max_revisions": 1
 }

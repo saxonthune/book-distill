@@ -23,6 +23,7 @@ key_terms:
 ```
 
 Only include items that are clearly stated or strongly implied. Omit empty sections.
+{extraction_notes}
 
 ---
 

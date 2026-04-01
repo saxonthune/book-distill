@@ -21,7 +21,7 @@ from pathlib import Path
 import litellm
 import yaml
 
-from config import load_config, setup_litellm, load_prompt
+from config import load_config, load_settings, setup_litellm, load_prompt
 
 
 def extract_chunk(model: str, prompt_template: str, chunk_path: Path) -> dict:
@@ -79,7 +79,9 @@ def run_extraction(pipeline_path: str) -> None:
     config = load_config()
     setup_litellm(config)
     model = config["models"]["extraction"]
-    prompt_template = load_prompt("extract")
+    settings = load_settings(pipeline_path, config)
+    extraction_notes = settings.get("extraction_notes", "")
+    prompt_template = load_prompt("extract").replace("{extraction_notes}", extraction_notes)
 
     total_count = len(remaining)
     print(f"Extracting {total_count} chunks with {model}...", flush=True)

@@ -8,7 +8,20 @@ Rules:
 - Group by theme, not by source chapter
 - Target: {target_lines} lines max
 
-Output the full SKILL.md content including YAML frontmatter.
+Output the full SKILL.md content including YAML frontmatter. The frontmatter MUST use this exact format:
+
+```
+---
+skill: <Skill Name Here>
+description: <one-line description>
+version: 1.0
+author: Claude
+tags:
+  - <tag>
+---
+```
+
+The `skill:` key is required — do not use `skill_id:`, `name:`, or other variants.
 
 ---
 

@@ -17,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-from config import load_config, ROOT
+from config import load_config, load_settings, ROOT
 
 
 def load_triage(pipeline_path: Path) -> dict | None:
@@ -31,23 +31,72 @@ def load_triage(pipeline_path: Path) -> dict | None:
     return data
 
 
-def get_page_ranges_to_skip(triage: dict | None, meta: dict) -> set[int]:
-    """Return page numbers to skip based on triage decisions."""
+def load_toc_chapters(pages_dir: Path) -> list[dict]:
+    """Parse toc.txt to extract top-level chapter start pages.
+
+    Returns list of {"number": "1", "title": "...", "start_page": 13}.
+    """
+    toc_file = pages_dir / "toc.txt"
+    if not toc_file.exists():
+        return []
+
+    import re
+    entries = []
+    for line in toc_file.read_text().splitlines():
+        # Top-level entries are not indented: "1 Title here (p.13)"
+        m = re.match(r"^(\w+)\s+(.+?)\s+\(p\.(\d+)\)\s*$", line)
+        if m:
+            entries.append({
+                "number": m.group(1),
+                "title": m.group(2),
+                "start_page": int(m.group(3)),
+            })
+    return entries
+
+
+def get_page_ranges_to_skip(triage: dict | None, meta: dict, pages_dir: Path) -> set[int]:
+    """Return page numbers to skip based on triage decisions + TOC page ranges."""
     if not triage or "chapters" not in triage:
         return set()
 
+    toc_chapters = load_toc_chapters(pages_dir)
+    if not toc_chapters:
+        return set()
+
+    # Build number → start_page lookup from TOC
+    toc_lookup = {ch["number"]: ch["start_page"] for ch in toc_chapters}
+    total_pages = meta.get("total_pages", 0)
+
+    # Resolve start/end pages for each triage chapter
+    triage_chapters = triage["chapters"]
+    resolved = []
+    for ch in triage_chapters:
+        num = str(ch.get("number", ""))
+        start = ch.get("start_page") or toc_lookup.get(num)
+        if start is None:
+            continue
+        resolved.append({"start_page": start, "treatment": ch.get("treatment", "extract")})
+
+    # Sort by start page and compute end pages
+    resolved.sort(key=lambda c: c["start_page"])
+    for i, ch in enumerate(resolved):
+        if i + 1 < len(resolved):
+            ch["end_page"] = resolved[i + 1]["start_page"] - 1
+        else:
+            ch["end_page"] = total_pages
+
+    # Pages before first chapter are front matter — skip
     skip_pages = set()
-    chapters = triage["chapters"]
-    for i, ch in enumerate(chapters):
-        if ch.get("treatment") == "skip":
-            start = ch.get("start_page", 0)
-            # End page is the start of next chapter, or end of book
-            if i + 1 < len(chapters):
-                end = chapters[i + 1].get("start_page", start)
-            else:
-                end = meta.get("total_pages", start) + 1
-            for p in range(start, end):
+    if resolved:
+        for p in range(1, resolved[0]["start_page"]):
+            skip_pages.add(p)
+
+    # Skip pages in "skip" chapters
+    for ch in resolved:
+        if ch["treatment"] == "skip":
+            for p in range(ch["start_page"], ch["end_page"] + 1):
                 skip_pages.add(p)
+
     return skip_pages
 
 
@@ -124,15 +173,16 @@ def run_chunking(pipeline_path: str) -> None:
     meta_file = pages_dir / "meta.json"
     meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
 
-    # Load config for chunk sizing
+    # Load config, with per-book settings override
     config = load_config()
-    chunk_cfg = config.get("chunking", {})
+    settings = load_settings(pipeline_path, config)
+    chunk_cfg = settings["chunking"]
     max_words = chunk_cfg.get("max_words", 500)
     overlap_words = chunk_cfg.get("overlap_words", 50)
 
     # Load triage decisions
     triage = load_triage(pipeline_path)
-    skip_pages = get_page_ranges_to_skip(triage, meta)
+    skip_pages = get_page_ranges_to_skip(triage, meta, pages_dir)
     if skip_pages:
         print(f"Triage: skipping {len(skip_pages)} pages")
 

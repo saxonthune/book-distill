@@ -98,13 +98,20 @@ def make_book_name(title: str | None, creator: str | None, max_title_words: int 
     title_words = short_title.split()[:max_title_words]
     title_part = " ".join(title_words)
 
-    # Extract last name from creator
+    # Extract last name from first author
     if creator:
-        # Handle "First Last", "First M. Last", "Last, First"
-        if "," in creator:
-            last_name = creator.split(",")[0].strip()
+        # Handle multiple authors: "A, B" or "A and B" — take the first
+        first_author = re.split(r"\band\b|;", creator)[0].strip()
+        # "First Last" or "First M. Last" — last word is surname
+        # "Last, First" — first word before comma is surname
+        # Multi-author comma: "First Last, First Last" — 2+ words before comma = full name
+        parts_by_comma = first_author.split(",")
+        if len(parts_by_comma) == 2 and len(parts_by_comma[0].split()) == 1:
+            # "Last, First" format
+            last_name = parts_by_comma[0].strip()
         else:
-            last_name = creator.split()[-1].strip()
+            # "First Last" or "First Last, Second Author" — take last word of first chunk
+            last_name = parts_by_comma[0].strip().split()[-1]
         return slugify(f"{last_name} {title_part}")
 
     return slugify(title_part)
@@ -264,6 +271,65 @@ def parse_nav_toc(nav_html: str) -> list[dict]:
 
 # --- PDF extraction ---
 
+def pdf_metadata(doc: fitz.Document) -> tuple[str | None, str | None, str | None]:
+    """Extract title and author from PDF metadata or page 1 text.
+
+    Returns (title, author, first_page_text). The first_page_text is always
+    returned when available so an agent can inspect it to identify the book.
+    """
+    first_page_text = None
+    if len(doc) > 0:
+        first_page_text = doc[0].get_text().strip() or None
+
+    # Try embedded PDF metadata first
+    meta = doc.metadata or {}
+    title = meta.get("title", "").strip() or None
+    author = meta.get("author", "").strip() or None
+    if title:
+        return title, author, first_page_text
+
+    # Fall back to page 1 text heuristic
+    if not first_page_text:
+        return None, None, None
+
+    lines = [l.strip() for l in first_page_text.split("\n") if l.strip()]
+
+    # Filter noise common on academic/book title pages
+    noise = re.compile(
+        r"^arXiv:|^\d{4}\.\d+|^\(Last updated|^©|^\d+$|^ISBN", re.I
+    )
+    clean = [l for l in lines if not noise.match(l) and len(l) > 2]
+    if not clean:
+        return None, None, first_page_text
+
+    # Heuristic: title lines first, then author-like lines (2-4 capitalized words)
+    title_lines = []
+    author_lines = []
+    past_title = False
+    for line in clean:
+        words = line.split()
+        looks_like_name = (
+            2 <= len(words) <= 5
+            and all(
+                w[0].isupper()
+                for w in words
+                if w not in ("and", "de", "van", "von", "di", "del", "et")
+            )
+            and not any(c in line for c in ":;!?()[]{}=")
+        )
+        if not past_title and not looks_like_name:
+            title_lines.append(line)
+        elif looks_like_name:
+            past_title = True
+            author_lines.append(line)
+        elif past_title:
+            break
+
+    title = " ".join(title_lines).strip() if title_lines else None
+    author = ", ".join(author_lines).strip() if author_lines else None
+    return title, author, first_page_text
+
+
 def extract_toc(doc: fitz.Document) -> list[dict] | None:
     """Extract table of contents if available."""
     toc = doc.get_toc()
@@ -275,14 +341,26 @@ def extract_toc(doc: fitz.Document) -> list[dict] | None:
     return entries
 
 
-def extract_pdf(pdf_path: Path, name_override: str | None = None) -> None:
-    book_name = slugify(name_override) if name_override else slugify(pdf_path.name)
+def extract_pdf(pdf_path: Path, name_override: str | None = None, use_markdown: bool = False) -> None:
+    doc = fitz.open(str(pdf_path))
+
+    # Derive book name: override > metadata (author + title) > filename
+    title, author, first_page_text = pdf_metadata(doc)
+    if name_override:
+        book_name = slugify(name_override)
+    else:
+        book_name = make_book_name(title, author)
+        if book_name:
+            print(f"Using metadata: {author or '?'} — {title}")
+        else:
+            book_name = slugify(pdf_path.name)
+
     base = pipeline_dir(book_name)
     pages_dir = base / "01-pages"
 
-    doc = fitz.open(str(pdf_path))
     total = len(doc)
-    print(f"Extracting {total} pages from {pdf_path.name}...")
+    method = "markdown (pymupdf4llm)" if use_markdown else "plain text"
+    print(f"Extracting {total} pages from {pdf_path.name} [{method}]...")
 
     # Extract TOC
     toc_entries = extract_toc(doc)
@@ -291,7 +369,31 @@ def extract_pdf(pdf_path: Path, name_override: str | None = None) -> None:
         toc_path.write_text(format_toc(toc_entries))
         print(f"  TOC extracted ({len(toc_entries)} entries) → toc.txt")
 
-    # Extract pages
+    doc.close()
+
+    if use_markdown:
+        extract_pdf_markdown(pdf_path, pages_dir, total)
+    else:
+        extract_pdf_plain(pdf_path, pages_dir, total)
+
+    meta = {
+        "source": str(pdf_path),
+        "source_format": "pdf",
+        "extraction_method": "markdown" if use_markdown else "plain",
+        "book_name": book_name,
+        "title": title,
+        "author": author,
+        "first_page_text": first_page_text,
+        "total_pages": total,
+        "has_toc": toc_entries is not None,
+    }
+    (pages_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"  Metadata → meta.json")
+
+
+def extract_pdf_plain(pdf_path: Path, pages_dir: Path, total: int) -> None:
+    """Extract pages as plain text using PyMuPDF."""
+    doc = fitz.open(str(pdf_path))
     empty_count = 0
     for i, page in enumerate(doc):
         text = page.get_text()
@@ -299,23 +401,26 @@ def extract_pdf(pdf_path: Path, name_override: str | None = None) -> None:
         page_file.write_text(text)
         if not text.strip():
             empty_count += 1
-
     doc.close()
-
     print(f"  {total} pages → {pages_dir}/")
     if empty_count:
         print(f"  ({empty_count} empty pages — likely images/diagrams)")
 
-    meta = {
-        "source": str(pdf_path),
-        "source_format": "pdf",
-        "book_name": book_name,
-        "total_pages": total,
-        "empty_pages": empty_count,
-        "has_toc": toc_entries is not None,
-    }
-    (pages_dir / "meta.json").write_text(json.dumps(meta, indent=2))
-    print(f"  Metadata → meta.json")
+
+def extract_pdf_markdown(pdf_path: Path, pages_dir: Path, total: int) -> None:
+    """Extract pages as markdown using pymupdf4llm. Better for equations and formatting."""
+    import pymupdf4llm
+
+    empty_count = 0
+    for i in range(total):
+        md = pymupdf4llm.to_markdown(str(pdf_path), pages=[i])
+        page_file = pages_dir / f"page-{i + 1:04d}.txt"
+        page_file.write_text(md)
+        if not md.strip():
+            empty_count += 1
+    print(f"  {total} pages → {pages_dir}/")
+    if empty_count:
+        print(f"  ({empty_count} empty pages — likely images/diagrams)")
 
 
 # --- Shared ---
@@ -332,28 +437,26 @@ def format_toc(entries: list[dict]) -> str:
 # --- Main ---
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("Usage: python scripts/01_extract_text.py <path-to-pdf-or-epub> [--name <skill-name>]")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description="Extract text from PDF or EPUB")
+    parser.add_argument("input", help="Path to PDF or EPUB file")
+    parser.add_argument("--name", help="Override book name")
+    parser.add_argument("--markdown", action="store_true",
+                        help="Use pymupdf4llm for markdown extraction (better for equations/formatting)")
+    args = parser.parse_args()
 
-    input_path = Path(sys.argv[1]).resolve()
+    input_path = Path(args.input).resolve()
     if not input_path.exists():
         print(f"Error: {input_path} not found")
         sys.exit(1)
 
-    # Optional --name override
-    name_override = None
-    if len(sys.argv) == 4 and sys.argv[2] == "--name":
-        name_override = sys.argv[3]
-    elif len(sys.argv) == 3:
-        # Allow positional: script.py file.epub "My Book Name"
-        name_override = sys.argv[2]
-
     suffix = input_path.suffix.lower()
     if suffix == ".epub":
-        extract_epub(input_path, name_override)
+        if args.markdown:
+            print("Warning: --markdown is only supported for PDFs, ignoring")
+        extract_epub(input_path, args.name)
     elif suffix == ".pdf":
-        extract_pdf(input_path, name_override)
+        extract_pdf(input_path, args.name, use_markdown=args.markdown)
     else:
         print(f"Error: Unsupported format '{suffix}'. Use .pdf or .epub")
         sys.exit(1)
