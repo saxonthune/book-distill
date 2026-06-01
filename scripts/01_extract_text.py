@@ -117,6 +117,20 @@ def make_book_name(title: str | None, creator: str | None, max_title_words: int 
     return slugify(title_part)
 
 
+def _href_key(href: str | None) -> str | None:
+    """Normalize an EPUB href to a comparable filename key (no path, no fragment).
+
+    TOC hrefs (from NCX/nav) and manifest hrefs may use different relative
+    paths but reference the same file; matching on the basename is robust
+    across the common EPUB layouts.
+    """
+    if not href:
+        return None
+    from urllib.parse import unquote
+    h = unquote(href).split("#", 1)[0]
+    return Path(h).name or None
+
+
 def extract_epub(epub_path: Path, name_override: str | None = None) -> None:
     # Derive book name: override > metadata (author + title) > filename
     if name_override:
@@ -163,6 +177,27 @@ def extract_epub(epub_path: Path, name_override: str | None = None) -> None:
         # Extract NCX TOC if available
         toc_entries = extract_epub_toc(zf, opf, opf_ns, opf_dir)
         if toc_entries:
+            # Align TOC page numbers to actual chapter file numbers. Chapters
+            # are written below as ch-{spine_index+1}; each TOC entry references
+            # a spine file via its href. Map href -> file number so "(p.N)" in
+            # toc.txt means ch-{N}. Without this, any spine entry missing from
+            # the TOC (cover, nav, blank) offsets every page number from its
+            # file and breaks downstream triage/skip mapping.
+            spine_filenum = {}
+            for idx, sid in enumerate(spine_ids):
+                key = _href_key(manifest[sid])
+                if key is not None:
+                    spine_filenum.setdefault(key, idx + 1)
+            unmatched = 0
+            for e in toc_entries:
+                fn = spine_filenum.get(_href_key(e.get("href")))
+                if fn is not None:
+                    e["page"] = fn
+                else:
+                    unmatched += 1
+            if unmatched:
+                print(f"  ({unmatched} TOC entries couldn't be matched to a file — "
+                      f"kept sequential numbering for those)")
             toc_path = pages_dir / "toc.txt"
             toc_path.write_text(format_toc(toc_entries))
             print(f"  TOC extracted ({len(toc_entries)} entries) → toc.txt")
@@ -253,7 +288,11 @@ def parse_ncx_toc(ncx: ET.Element, level: int = 1) -> list[dict]:
         if label_el is None:
             label_el = np.find(".//{http://www.daisy.org/z3986/2005/ncx/}text")
         title = label_el.text.strip() if label_el is not None and label_el.text else "Untitled"
-        entries.append({"level": 1, "title": title, "page": len(entries) + 1})
+        content_el = np.find("ncx:content", ns)
+        if content_el is None:
+            content_el = np.find("{http://www.daisy.org/z3986/2005/ncx/}content")
+        href = content_el.attrib.get("src") if content_el is not None else None
+        entries.append({"level": 1, "title": title, "page": len(entries) + 1, "href": href})
 
     return entries if entries else None
 
@@ -262,10 +301,13 @@ def parse_nav_toc(nav_html: str) -> list[dict]:
     """Parse EPUB 3 nav document for TOC entries."""
     # Simple regex extraction — nav docs are well-structured
     entries = []
-    for match in re.finditer(r"<a[^>]*>([^<]+)</a>", nav_html):
-        title = match.group(1).strip()
-        if title:
-            entries.append({"level": 1, "title": title, "page": len(entries) + 1})
+    for match in re.finditer(r"<a\b([^>]*)>([^<]+)</a>", nav_html):
+        attrs, title = match.group(1), match.group(2).strip()
+        if not title:
+            continue
+        href_m = re.search(r'href\s*=\s*"([^"]*)"', attrs)
+        href = href_m.group(1).strip() if href_m else None
+        entries.append({"level": 1, "title": title, "page": len(entries) + 1, "href": href})
     return entries if entries else None
 
 

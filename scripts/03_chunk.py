@@ -14,6 +14,7 @@ Output:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -31,31 +32,46 @@ def load_triage(pipeline_path: Path) -> dict | None:
     return data
 
 
+def _norm_title(title: str) -> str:
+    """Normalize a chapter title for fuzzy matching (lowercase, alnum-only)."""
+    return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+
+
 def load_toc_chapters(pages_dir: Path) -> list[dict]:
     """Parse toc.txt to extract top-level chapter start pages.
 
-    Returns list of {"number": "1", "title": "...", "start_page": 13}.
+    Lines are written by format_toc as "{title} (p.{page})", with sub-levels
+    indented by two spaces. Only top-level (non-indented) entries are returned.
+    Titles may be one or many words and carry no leading chapter number.
+
+    Returns list of {"title": "...", "start_page": 13}.
     """
     toc_file = pages_dir / "toc.txt"
     if not toc_file.exists():
         return []
 
-    import re
     entries = []
     for line in toc_file.read_text().splitlines():
-        # Top-level entries are not indented: "1 Title here (p.13)"
-        m = re.match(r"^(\w+)\s+(.+?)\s+\(p\.(\d+)\)\s*$", line)
+        # Top-level entries start with a non-space char (sub-entries are indented).
+        m = re.match(r"^(\S.*?)\s+\(p\.(\d+)\)\s*$", line)
         if m:
             entries.append({
-                "number": m.group(1),
-                "title": m.group(2),
-                "start_page": int(m.group(3)),
+                "title": m.group(1).strip(),
+                "start_page": int(m.group(2)),
             })
     return entries
 
 
 def get_page_ranges_to_skip(triage: dict | None, meta: dict, pages_dir: Path) -> set[int]:
-    """Return page numbers to skip based on triage decisions + TOC page ranges."""
+    """Return page numbers to skip based on triage decisions + TOC page ranges.
+
+    Triage chapters are resolved to real page/file ranges by matching their
+    title against the TOC (an explicit ``start_page`` on the triage entry wins).
+    This is fail-safe: a ``skip`` chapter that cannot be confidently matched to
+    a TOC entry is KEPT (not skipped) and reported, because a wrong skip
+    silently deletes real content whereas a wrong keep only adds cheap noise
+    that washes out in merge/synthesis. All skip/keep decisions are logged.
+    """
     if not triage or "chapters" not in triage:
         return set()
 
@@ -63,39 +79,45 @@ def get_page_ranges_to_skip(triage: dict | None, meta: dict, pages_dir: Path) ->
     if not toc_chapters:
         return set()
 
-    # Build number → start_page lookup from TOC
-    toc_lookup = {ch["number"]: ch["start_page"] for ch in toc_chapters}
     total_pages = meta.get("total_pages", 0)
 
-    # Resolve start/end pages for each triage chapter
-    triage_chapters = triage["chapters"]
-    resolved = []
-    for ch in triage_chapters:
-        num = str(ch.get("number", ""))
-        start = ch.get("start_page") or toc_lookup.get(num)
-        if start is None:
-            continue
-        resolved.append({"start_page": start, "treatment": ch.get("treatment", "extract")})
+    # Resolve each TOC chapter's [start_page, end_page] range over the real files.
+    toc = sorted(toc_chapters, key=lambda c: c["start_page"])
+    for i, ch in enumerate(toc):
+        ch["end_page"] = toc[i + 1]["start_page"] - 1 if i + 1 < len(toc) else total_pages
+    by_title = {_norm_title(c["title"]): c for c in toc}
+    by_start = {c["start_page"]: c for c in toc}
 
-    # Sort by start page and compute end pages
-    resolved.sort(key=lambda c: c["start_page"])
-    for i, ch in enumerate(resolved):
-        if i + 1 < len(resolved):
-            ch["end_page"] = resolved[i + 1]["start_page"] - 1
-        else:
-            ch["end_page"] = total_pages
-
-    # Pages before first chapter are front matter — skip
     skip_pages = set()
-    if resolved:
-        for p in range(1, resolved[0]["start_page"]):
+    skipped, kept_unresolved = [], []
+    for ch in triage["chapters"]:
+        if ch.get("treatment") != "skip":
+            continue
+        title = ch.get("title", "")
+        # Prefer an explicit start_page; otherwise match by normalized title.
+        match = by_start.get(ch.get("start_page")) if ch.get("start_page") else None
+        if match is None:
+            match = by_title.get(_norm_title(title))
+        if match is None:
+            kept_unresolved.append(title or "(untitled)")
+            continue
+        for p in range(match["start_page"], match["end_page"] + 1):
             skip_pages.add(p)
+        skipped.append((title or match["title"], match["start_page"], match["end_page"]))
 
-    # Skip pages in "skip" chapters
-    for ch in resolved:
-        if ch["treatment"] == "skip":
-            for p in range(ch["start_page"], ch["end_page"] + 1):
-                skip_pages.add(p)
+    # Pages before the first TOC chapter are front matter — skip them.
+    front = range(1, toc[0]["start_page"])
+    skip_pages.update(front)
+
+    if front:
+        print(f"  Triage: skipping {len(front)} front-matter page(s) before first chapter")
+    for title, s, e in skipped:
+        print(f"  Triage: skip '{title}' (p.{s}-{e})")
+    if kept_unresolved:
+        print(f"  Triage: KEEPING {len(kept_unresolved)} 'skip' chapter(s) that could not be "
+              f"matched to a TOC entry (fail-safe — review if unexpected):")
+        for title in kept_unresolved:
+            print(f"    - keep '{title}'")
 
     return skip_pages
 
@@ -121,38 +143,34 @@ def chunk_pages(pages: list[tuple[int, str]], max_words: int, overlap_words: int
     chunks = []
     current_words = []
     current_pages = []
-    current_word_count = 0
 
     for page_num, text in pages:
         words = text.split()
         current_words.extend(words)
-        current_pages.append(page_num)
-        current_word_count += len(words)
+        if not current_pages or current_pages[-1] != page_num:
+            current_pages.append(page_num)
 
-        if current_word_count >= max_words:
-            chunk_text = " ".join(current_words)
+        # Emit as many full chunks as the accumulated text allows. This splits
+        # within a single oversized page/chapter (e.g. EPUB chapters that are
+        # thousands of words) rather than emitting one giant chunk per page.
+        while len(current_words) >= max_words:
+            chunk_words = current_words[:max_words]
             chunks.append({
                 "pages": list(current_pages),
-                "word_count": current_word_count,
-                "text": chunk_text,
+                "word_count": len(chunk_words),
+                "text": " ".join(chunk_words),
             })
 
-            # Keep overlap from the end of this chunk
-            if overlap_words > 0:
-                overlap = current_words[-overlap_words:]
-                current_words = overlap
-                current_word_count = len(overlap)
-                current_pages = [current_pages[-1]]
-            else:
-                current_words = []
-                current_word_count = 0
-                current_pages = []
+            # Carry overlap into the next chunk; stay anchored to the current page.
+            cut = max_words - overlap_words if overlap_words > 0 else max_words
+            current_words = current_words[cut:]
+            current_pages = [page_num]
 
     # Final chunk
     if current_words:
         chunks.append({
             "pages": list(current_pages),
-            "word_count": current_word_count,
+            "word_count": len(current_words),
             "text": " ".join(current_words),
         })
 

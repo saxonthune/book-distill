@@ -61,9 +61,20 @@ Each step reads from the previous step's directory and writes to its own. All in
    ```
 4. Output lands in `output/<book-name>-skill/SKILL.md` and `~/.claude/skills/book-summary/<file>.md`
 
-The book name is derived from the PDF filename (lowercased, slugified). Steps 1, 1b, 3, and 5 are local (no API calls). Step 1b is optional — without it, config.json defaults are used. Step 4 is resumable — rerun to retry failed chunks. Step 9 requires `book-meta.json` in the pipeline dir (author, title, year, summary, filename) — it will prompt interactively if missing.
+The book name is derived from the source filename (lowercased, slugified) for PDFs, or from EPUB metadata (author last name + title words) for EPUBs — so it usually won't match the input filename. Step 01 prints the chosen name and `book_name`; use that for all later steps. Steps 1, 1b, 3, and 5 are local (no API calls). Step 1b is optional — without it, config.json defaults are used. Step 4 is resumable — rerun to retry failed chunks. Step 9 requires `book-meta.json` in the pipeline dir (author, title, year, summary, filename) — it will prompt interactively if missing.
 
 All books install into a single shared skill at `~/.claude/skills/book-summary/`. The `SKILL.md` there is a routing table; each book is a separate `.md` file. The skill triggers when the user references an author or title, and routes to the correct book file.
+
+### EPUB sources (gotchas)
+
+EPUBs extract one file per chapter (`ch-*.txt`), not per page, so a "page" can be thousands of words. Two things to know:
+
+- **Triage skip mapping is offset-corrected and fail-safe (handled in code).** EPUBs frequently have a spine entry (cover, blank, nav) that isn't in the TOC, which would otherwise offset every TOC `(p.N)` number from the actual `ch-*.txt` files and cause a `skip` to silently delete a real chapter. Step 01 now maps each TOC entry to its real chapter file via the entry's `href`, so `(p.N)` in `toc.txt` means `ch-N` (note: page numbers may have gaps where spine files aren't in the TOC — that's correct). Step 03 resolves triage `skip` decisions by matching the chapter **title** against the TOC, and if it can't match confidently it **keeps the chapter and prints a warning** rather than skipping (a wrong skip loses content; a wrong keep is cheap). Step 03 logs every skip/keep — **read that output**; if a chapter you expected to skip shows up as "KEEPING ... could not be matched", the title in `triage.yaml` doesn't match `toc.txt`. For EPUBs with small front/back matter, deleting `02-triage/triage.yaml` to process all chapters is still a fine, simple choice.
+- **Chunk size matters more.** Step 03 splits *within* an oversized chapter (it no longer emits one giant chunk per chapter), but the default `max_words: 500` will fragment long narrative chapters mid-anecdote. For narrative nonfiction, set `chunking.max_words` to ~2000–2500 (with `overlap_words` ~150) in `pipeline/<book>/settings.json` so each chunk keeps a complete anecdote/argument. Dense technical books are fine at the 500 default.
+
+### Manual edits to the final SKILL.md
+
+Step 09 installs from `06-synthesized/SKILL.md` (or the best `06-synthesized/rev-N/SKILL.md`), **not** from `output/`. If you hand-edit the skill instead of running step 08, edit `06-synthesized/SKILL.md` — editing only the `output/` copy will not be installed.
 
 ### Vision pipeline (scanned/image-heavy books)
 
