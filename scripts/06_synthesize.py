@@ -14,7 +14,36 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 from config import load_config, load_settings, setup_litellm, load_prompt, stream_completion, ROOT
+
+
+def density_floor(merged_path: Path) -> tuple[int, int, int]:
+    """Compute a target_lines floor from the count of must/should-strength items.
+
+    target_lines from 01b is sized by source word count, but the binding
+    constraint on a how-to/reference book is *item density*: a book with
+    hundreds of distinct must/should rules needs room to fit them all even
+    if its word count is modest. Returns (floor, must_count, should_count).
+    """
+    try:
+        merged = yaml.safe_load(merged_path.read_text())
+    except Exception:
+        return 0, 0, 0
+    must = should = 0
+    for key in ("principles", "patterns", "anti_patterns"):
+        for item in merged.get(key, []) or []:
+            strength = (item.get("strength") or "").strip().lower() if isinstance(item, dict) else ""
+            if strength == "must":
+                must += 1
+            elif strength == "should":
+                should += 1
+    # ~1 line per must/should item + ~30% overhead for headings/framing,
+    # capped so a pathological extraction can't demand a runaway document.
+    high_priority = must + should
+    floor = min(1000, int(high_priority * 1.3)) if high_priority else 0
+    return floor, must, should
 
 
 def run_synthesis(pipeline_path: str) -> None:
@@ -37,6 +66,14 @@ def run_synthesis(pipeline_path: str) -> None:
     model = config["models"]["synthesis"]
     settings = load_settings(pipeline_path, config)
     target_lines = settings["synthesis"].get("target_lines", 400)
+
+    # Raise the target if the book is dense with high-priority rules — a
+    # word-count-derived target can be too tight to fit every must/should item.
+    floor, must_n, should_n = density_floor(merged_path)
+    if floor > target_lines:
+        print(f"  Density floor: {must_n} must + {should_n} should items → "
+              f"raising target {target_lines} → {floor} lines")
+        target_lines = floor
 
     prompt_template = load_prompt("synthesize")
     prompt = prompt_template.replace("{extractions}", merged_text).replace("{target_lines}", str(target_lines))

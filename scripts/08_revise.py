@@ -18,11 +18,22 @@ from config import load_config, load_settings, setup_litellm, load_prompt, strea
 
 
 def parse_verdict(report_text: str) -> str:
-    """Extract PASS/REVIEW/FAIL from a verification report."""
+    """Extract PASS/REVIEW/FAIL from a verification report.
+
+    Reads from the '## Verdict' section only — the report prose often mentions
+    other verdicts (e.g. "prevent a full **PASS**"), so a whole-document
+    substring search would false-match.
+    """
+    # Isolate the Verdict section if present; otherwise scan the whole report.
+    idx = report_text.rfind("## Verdict")
+    section = report_text[idx:] if idx != -1 else report_text
+    # The actual verdict is the first marker that appears in that section.
+    first = None
     for marker in ("**PASS**", "**REVIEW**", "**FAIL**"):
-        if marker in report_text:
-            return marker.strip("*")
-    return "UNKNOWN"
+        pos = section.find(marker)
+        if pos != -1 and (first is None or pos < first[0]):
+            first = (pos, marker)
+    return first[1].strip("*") if first else "UNKNOWN"
 
 
 
@@ -36,12 +47,20 @@ def run_revision(pipeline_path: str, skill_path: Path, report_path: Path,
     skill_text = skill_path.read_text()
     report_text = report_path.read_text()
 
+    # Revision is additive: give the model headroom above the current document
+    # so it can fold in the flagged gaps WITHOUT dropping existing content to
+    # stay under a fixed budget (the old whack-a-mole failure mode). Budget =
+    # current length + room for the gaps, capped to avoid runaway growth.
+    current_lines = len(skill_text.splitlines())
+    gap_count = report_text.count("\n*   ") + report_text.count("\n- ")
+    rev_target = min(max(target_lines, current_lines + max(40, gap_count * 4)), current_lines + 250)
+
     prompt_template = load_prompt("revise")
     prompt = (prompt_template
               .replace("{skill}", skill_text)
               .replace("{report}", report_text)
               .replace("{merged}", merged_text)
-              .replace("{target_lines}", str(target_lines)))
+              .replace("{target_lines}", str(rev_target)))
 
     # --- Revise ---
     print(f"\n--- Revision {rev_num} ---")

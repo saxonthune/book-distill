@@ -32,10 +32,19 @@ SKILL_MD = SKILL_DIR / "SKILL.md"
 
 
 def parse_verdict(report_text: str) -> str:
+    """Read the verdict from the '## Verdict' section only.
+
+    Report prose often mentions other verdicts (e.g. "prevent a full **PASS**"),
+    so a whole-document substring search would false-match and mis-rank versions.
+    """
+    idx = report_text.rfind("## Verdict")
+    section = report_text[idx:] if idx != -1 else report_text
+    first = None
     for marker in ("**PASS**", "**REVIEW**", "**FAIL**"):
-        if marker in report_text:
-            return marker.strip("*")
-    return "UNKNOWN"
+        pos = section.find(marker)
+        if pos != -1 and (first is None or pos < first[0]):
+            first = (pos, marker)
+    return first[1].strip("*") if first else "UNKNOWN"
 
 
 VERDICT_RANK = {"PASS": 3, "REVIEW": 2, "FAIL": 1, "UNKNOWN": 0}

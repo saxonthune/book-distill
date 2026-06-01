@@ -2,6 +2,18 @@ You are a coverage auditor. Compare the source material (merged YAML extractions
 
 Your job: find substantive knowledge that was dropped or diluted during synthesis. The SKILL.md is a distillation — it is expected to be much shorter than the source. Focus on whether the *transferable knowledge* is captured, not whether every detail is present.
 
+## Critical: judge against the line budget, not the full source
+
+The SKILL.md is a LOSSY compression with a fixed length budget. The source typically contains far more distinct items than can fit. Dropping items is therefore EXPECTED and CORRECT — the only question is whether the *right* items were kept. Do not produce a list of everything that didn't fit; that is the compressor working as intended.
+
+Most principles, patterns, and anti-patterns in the source carry a `strength` field: `must`, `should`, or `consider`. Use it to triage what to flag:
+
+- **`must`-strength items dropped or diluted → REAL gaps.** These are the core, non-negotiable rules. Always flag.
+- **`should`-strength items → flag only if the underlying idea is entirely absent** (not merely a missing restatement of something already covered).
+- **`consider`-strength items dropped → NOT a gap.** These are optional refinements and elegant-but-inessential touches; a good distillation is expected to cut most of them. Do not flag them unless one anchors a conceptual vocabulary the framework depends on.
+
+When an item has no `strength` field, judge by importance: is this a load-bearing rule someone needs to apply the framework, or a nicety? Only flag the former.
+
 SOURCE MATERIAL (merged.yaml):
 {merged}
 
@@ -29,7 +41,7 @@ Produce a report with these sections:
 
 ## Missing Items
 
-List principles, patterns, anti-patterns, or key terms from the source that represent **distinct, substantive knowledge** completely absent from the SKILL.md. Do not list examples, illustrations, proper nouns, or restatements of covered ideas.
+List principles, patterns, anti-patterns, or key terms from the source that represent **distinct, substantive knowledge** completely absent from the SKILL.md. Apply the strength triage above: list `must`-strength gaps first, then genuinely-absent `should`-strength items. Do NOT list `consider`-strength omissions, examples, illustrations, proper nouns, or restatements of covered ideas. Tag each item with its strength, e.g. `(must)`.
 
 If nothing is missing, write "None found."
 
@@ -47,9 +59,11 @@ If nothing looks generic, write "None found."
 
 ## Verdict
 
+Base the verdict on `must`/`should`-strength coverage only — never downgrade for dropped `consider`-strength items or restatements.
+
 One of:
-- **PASS** — core principles, mental models, and vocabulary are well represented
-- **REVIEW** — mostly covered but there are notable gaps worth checking
-- **FAIL** — significant core knowledge was dropped
+- **PASS** — all `must`-strength rules and the core vocabulary are represented; at most minor `should`-strength gaps
+- **REVIEW** — a few `must`-strength rules or load-bearing concepts are missing or diluted
+- **FAIL** — many `must`-strength rules or whole frameworks were dropped
 
 Be specific. Quote brief snippets. Don't pad the report.
