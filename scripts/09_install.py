@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Step 9: Install the best SKILL.md into ~/.claude/skills/book-summary/.
 
-Picks the best version (first PASS, or highest coverage score) and installs
+Picks the best version (first PASS, otherwise v0) and installs
 it as a named .md file inside the shared book-summary skill directory.
 Also updates the routing table in book-summary/SKILL.md.
 
@@ -38,15 +38,17 @@ def parse_verdict(report_text: str) -> str:
     return "UNKNOWN"
 
 
-def parse_coverage(report_text: str) -> float:
-    match = re.search(r"(\d+)%", report_text.split("## Missing")[0] if "## Missing" in report_text else report_text)
-    if match:
-        return float(match.group(1))
-    return 0.0
+VERDICT_RANK = {"PASS": 3, "REVIEW": 2, "FAIL": 1, "UNKNOWN": 0}
 
 
 def find_best_skill(pipeline_path: Path) -> tuple[Path, str]:
-    """Find the best SKILL.md across v0 and any revisions."""
+    """Find the best SKILL.md across v0 and any revisions.
+
+    Picks the version with the best verdict (PASS > REVIEW > FAIL > UNKNOWN).
+    Ties break toward the LATEST revision, since each revision is meant to
+    fold in fixes — a revision that holds the same verdict as v0 is preferred
+    over v0 rather than discarded.
+    """
     synth_dir = pipeline_path / "06-synthesized"
     verify_dir = pipeline_path / "07-verified"
 
@@ -56,9 +58,9 @@ def find_best_skill(pipeline_path: Path) -> tuple[Path, str]:
     v0_report = verify_dir / "report.md"
     if v0_skill.exists() and v0_report.exists():
         report_text = v0_report.read_text()
-        versions.append(("v0", parse_verdict(report_text), parse_coverage(report_text), v0_skill))
+        versions.append(("v0", parse_verdict(report_text), v0_skill))
     elif v0_skill.exists():
-        versions.append(("v0", "UNKNOWN", 0.0, v0_skill))
+        versions.append(("v0", "UNKNOWN", v0_skill))
 
     rev_num = 1
     while True:
@@ -68,9 +70,9 @@ def find_best_skill(pipeline_path: Path) -> tuple[Path, str]:
             break
         if rev_report.exists():
             report_text = rev_report.read_text()
-            versions.append((f"rev-{rev_num}", parse_verdict(report_text), parse_coverage(report_text), rev_skill))
+            versions.append((f"rev-{rev_num}", parse_verdict(report_text), rev_skill))
         else:
-            versions.append((f"rev-{rev_num}", "UNKNOWN", 0.0, rev_skill))
+            versions.append((f"rev-{rev_num}", "UNKNOWN", rev_skill))
         rev_num += 1
 
     if not versions:
@@ -78,15 +80,17 @@ def find_best_skill(pipeline_path: Path) -> tuple[Path, str]:
 
     if len(versions) > 1:
         print("Available versions:")
-        for label, verdict, coverage, path in versions:
-            print(f"  {label:>6}: {verdict:<6} {coverage:.0f}%")
+        for label, verdict, path in versions:
+            print(f"  {label:>6}: {verdict}")
 
-    for v in versions:
-        if v[1] == "PASS":
-            return v[3], f"{v[0]} — PASS ({v[2]:.0f}%)"
-
-    best = max(versions, key=lambda v: v[2])
-    return best[3], f"{best[0]} — best coverage ({best[2]:.0f}%)"
+    # versions is ordered v0, rev-1, rev-2, ... — i.e. oldest to newest.
+    # Pick the best verdict; on a tie, the later (higher-index) version wins.
+    best_idx = 0
+    for i, v in enumerate(versions):
+        if VERDICT_RANK.get(v[1], 0) >= VERDICT_RANK.get(versions[best_idx][1], 0):
+            best_idx = i
+    best = versions[best_idx]
+    return best[2], f"{best[0]} — {best[1]} (best verdict, latest on tie)"
 
 
 def load_or_prompt_meta(pipeline_path: Path) -> dict:

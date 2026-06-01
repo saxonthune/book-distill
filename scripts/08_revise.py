@@ -10,7 +10,6 @@ Artifacts land in 06-synthesized/rev-N/ and 07-verified/rev-N/.
 """
 
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -25,13 +24,6 @@ def parse_verdict(report_text: str) -> str:
             return marker.strip("*")
     return "UNKNOWN"
 
-
-def parse_coverage(report_text: str) -> float:
-    """Extract coverage percentage from a verification report."""
-    match = re.search(r"(\d+)%", report_text.split("## Missing")[0] if "## Missing" in report_text else report_text)
-    if match:
-        return float(match.group(1))
-    return 0.0
 
 
 def run_revision(pipeline_path: str, skill_path: Path, report_path: Path,
@@ -125,8 +117,7 @@ def run_revision(pipeline_path: str, skill_path: Path, report_path: Path,
     (rev_verify_dir / "summary.json").write_text(json.dumps(v_summary, indent=2))
 
     verdict = parse_verdict(report)
-    coverage = parse_coverage(report)
-    print(f"  Verified in {elapsed:.0f}s — {verdict} ({coverage:.0f}%)")
+    print(f"  Verified in {elapsed:.0f}s — {verdict}")
 
     return rev_skill_path, rev_report_path
 
@@ -148,9 +139,8 @@ def run_revise_loop(pipeline_path: str) -> None:
 
     v0_report = v0_report_path.read_text()
     v0_verdict = parse_verdict(v0_report)
-    v0_coverage = parse_coverage(v0_report)
 
-    print(f"v0: {v0_verdict} ({v0_coverage:.0f}%)")
+    print(f"v0: {v0_verdict}")
 
     if v0_verdict == "PASS":
         print("v0 already passes — no revisions needed.")
@@ -161,8 +151,8 @@ def run_revise_loop(pipeline_path: str) -> None:
     max_revisions = config.get("max_revisions", 1)
     merged_text = merged_path.read_text()
 
-    # Track all versions: (version_label, verdict, coverage, skill_path)
-    versions = [("v0", v0_verdict, v0_coverage, v0_skill_path)]
+    # Track all versions: (version_label, verdict, skill_path)
+    versions = [("v0", v0_verdict, v0_skill_path)]
 
     current_skill = v0_skill_path
     current_report = v0_report_path
@@ -174,8 +164,7 @@ def run_revise_loop(pipeline_path: str) -> None:
         )
         report_text = rev_report.read_text()
         verdict = parse_verdict(report_text)
-        coverage = parse_coverage(report_text)
-        versions.append((f"rev-{rev}", verdict, coverage, rev_skill))
+        versions.append((f"rev-{rev}", verdict, rev_skill))
 
         current_skill = rev_skill
         current_report = rev_report
@@ -186,19 +175,18 @@ def run_revise_loop(pipeline_path: str) -> None:
 
     # Summary
     print("\n=== Revision Summary ===")
-    for label, verdict, coverage, path in versions:
-        print(f"  {label:>6}: {verdict:<6} {coverage:.0f}%  {path}")
+    for label, verdict, path in versions:
+        print(f"  {label:>6}: {verdict:<6}  {path}")
 
-    # Find best: first PASS, or highest coverage
-    best = None
+    # Find best: highest-ranked verdict; on a tie, the latest revision wins
+    # (each revision folds in fixes, so an equal-verdict revision beats v0).
+    verdict_rank = {"PASS": 3, "REVIEW": 2, "FAIL": 1, "UNKNOWN": 0}
+    best = versions[0]
     for v in versions:
-        if v[1] == "PASS":
+        if verdict_rank.get(v[1], 0) >= verdict_rank.get(best[1], 0):
             best = v
-            break
-    if best is None:
-        best = max(versions, key=lambda v: v[2])
 
-    print(f"\nBest version: {best[0]} ({best[1]}, {best[2]:.0f}%)")
+    print(f"\nBest version: {best[0]} ({best[1]})")
 
 
 if __name__ == "__main__":
